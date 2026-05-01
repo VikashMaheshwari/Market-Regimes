@@ -10,10 +10,11 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+import requests
+from io import StringIO
 import yfinance as yf
 from dateutil.relativedelta import relativedelta
 from hmmlearn.hmm import GaussianHMM
-from pandas_datareader import data as pdr
 from plotly.subplots import make_subplots
 from sklearn.mixture import GaussianMixture
 from sklearn.preprocessing import StandardScaler
@@ -48,8 +49,15 @@ def yf_close(ticker, start, end, name=None):
 
 
 def fetch_fred(series, start, end):
-    s = pdr.DataReader(series, "fred", start, end).iloc[:, 0]
-    s.index = pd.to_datetime(s.index).tz_localize(None)
+    url = (
+        f"https://fred.stlouisfed.org/graph/fredgraph.csv"
+        f"?id={series}&observation_start={start}&observation_end={end}"
+    )
+    resp = requests.get(url, timeout=30)
+    resp.raise_for_status()
+    df = pd.read_csv(StringIO(resp.text), parse_dates=["DATE"], index_col="DATE")
+    df.index = pd.to_datetime(df.index).tz_localize(None)
+    s = df.iloc[:, 0].replace(".", np.nan).astype(float).dropna()
     return s.rename(series)
 
 
