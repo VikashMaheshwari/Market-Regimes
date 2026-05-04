@@ -1,17 +1,18 @@
 """
-S&P 500 Market Regime Dashboard — self-contained, no pkl needed.
-Fetches data and retrains models on first load (~60s), then caches for the session.
+S&P 500 Market Regime Dashboard — Bloomberg/finance-pro dark theme.
+Self-contained; fetches data and retrains models on first load (~60 s).
 Deploy to Streamlit Community Cloud with only app.py + requirements.txt.
 """
 import warnings
 from datetime import date
+from io import StringIO
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-import streamlit as st
+import plotly.io as pio
 import requests
-from io import StringIO
+import streamlit as st
 import yfinance as yf
 from dateutil.relativedelta import relativedelta
 from hmmlearn.hmm import GaussianHMM
@@ -30,12 +31,161 @@ PRED_START   = (pd.Timestamp(TEST_START) - relativedelta(months=12)).strftime("%
 FEATURE_COLS = ["Log_Return", "Volatility", "MA_Crossover", "VIX_Change", "term_spread"]
 COST_BPS     = 5 / 10_000
 
-COLORS_K2 = {"Risk-OFF": "#D32F2F", "Risk-ON": "#388E3C"}
-COLORS_K3 = {"Bear": "#D32F2F", "Neutral": "#F57C00", "Bull": "#388E3C"}
+# ── Theme ──────────────────────────────────────────────────────────────────────
+BG       = "#0B1929"
+SURFACE  = "#152844"
+SURFACE2 = "#1B3355"
+RULE     = "#27406B"
+TEXT     = "#E8EEF6"
+SUBTEXT  = "#8FA4BF"
+GOLD     = "#E5B53D"
+CYAN     = "#4FC3F7"
+GREEN    = "#4CAF50"
+ORANGE   = "#FFB74D"
+RED      = "#EF5350"
+
+COLORS_K2 = {"Risk-OFF": RED, "Risk-ON": GREEN}
+COLORS_K3 = {"Bear": RED, "Neutral": ORANGE, "Bull": GREEN}
 ALLOC_K2  = {"Risk-ON": 1.0, "Risk-OFF": 0.0}
 ALLOC_K3  = {"Bull": 1.0, "Neutral": 0.5, "Bear": 0.0}
 
-st.set_page_config(page_title="Market Regime Dashboard", page_icon="📈", layout="wide")
+st.set_page_config(
+    page_title="Market Regime Dashboard",
+    page_icon="📈",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+# ── Custom CSS — Bloomberg-style dark UI ───────────────────────────────────────
+st.markdown(f"""
+<style>
+    /* App background */
+    .stApp {{
+        background-color: {BG};
+        color: {TEXT};
+    }}
+    /* Top gold accent bar */
+    .stApp > header {{
+        background-color: {BG};
+        border-bottom: 3px solid {GOLD};
+    }}
+    /* Sidebar */
+    section[data-testid="stSidebar"] {{
+        background-color: {SURFACE};
+        border-right: 1px solid {RULE};
+    }}
+    section[data-testid="stSidebar"] * {{
+        color: {TEXT};
+    }}
+    /* Headings */
+    h1, h2, h3, h4 {{
+        color: {TEXT} !important;
+        font-family: "Calibri", sans-serif;
+    }}
+    h1 {{
+        border-left: 5px solid {GOLD};
+        padding-left: 14px;
+        margin-bottom: 0.2rem;
+    }}
+    /* Caption / small text */
+    .stCaption, p, .stMarkdown {{
+        color: {SUBTEXT};
+    }}
+    /* Metric cards */
+    div[data-testid="stMetric"] {{
+        background-color: {SURFACE};
+        border: 1px solid {RULE};
+        border-left: 4px solid {GOLD};
+        padding: 14px 18px;
+        border-radius: 6px;
+    }}
+    div[data-testid="stMetric"] label {{
+        color: {SUBTEXT} !important;
+        font-size: 10px !important;
+        font-weight: 700 !important;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }}
+    div[data-testid="stMetricValue"] {{
+        color: {GOLD} !important;
+        font-size: 28px !important;
+        font-weight: 700 !important;
+    }}
+    div[data-testid="stMetricDelta"] {{
+        color: {CYAN} !important;
+    }}
+    /* Tabs */
+    .stTabs [data-baseweb="tab-list"] {{
+        gap: 0px;
+        border-bottom: 1px solid {RULE};
+    }}
+    .stTabs [data-baseweb="tab"] {{
+        background-color: transparent;
+        color: {SUBTEXT};
+        border-radius: 0;
+        padding: 12px 24px;
+        font-weight: 600;
+    }}
+    .stTabs [aria-selected="true"] {{
+        color: {GOLD} !important;
+        border-bottom: 3px solid {GOLD} !important;
+        background-color: {SURFACE};
+    }}
+    /* Buttons */
+    .stButton button {{
+        background-color: {GOLD};
+        color: {BG};
+        border: none;
+        font-weight: 700;
+        border-radius: 4px;
+    }}
+    .stButton button:hover {{
+        background-color: #c89a25;
+        color: {BG};
+    }}
+    /* Dataframe */
+    .stDataFrame {{
+        background-color: {SURFACE};
+        border: 1px solid {RULE};
+        border-radius: 4px;
+    }}
+    /* Info / alert boxes */
+    div[data-testid="stAlert"] {{
+        background-color: {SURFACE2};
+        border-left: 4px solid {CYAN};
+        color: {TEXT};
+    }}
+    /* Slider */
+    .stSlider [data-baseweb="slider"] [role="slider"] {{
+        background-color: {GOLD};
+    }}
+    /* Radio */
+    .stRadio label {{
+        color: {TEXT} !important;
+    }}
+    /* Hide Streamlit branding */
+    #MainMenu {{visibility: hidden;}}
+    footer {{visibility: hidden;}}
+</style>
+""", unsafe_allow_html=True)
+
+# ── Plotly dark template ───────────────────────────────────────────────────────
+PLOTLY_TEMPLATE = dict(
+    layout=dict(
+        paper_bgcolor=BG,
+        plot_bgcolor=SURFACE,
+        font=dict(color=TEXT, family="Calibri"),
+        title=dict(font=dict(color=TEXT, size=14)),
+        xaxis=dict(gridcolor=RULE, zerolinecolor=RULE, color=SUBTEXT),
+        yaxis=dict(gridcolor=RULE, zerolinecolor=RULE, color=SUBTEXT),
+        legend=dict(bgcolor=SURFACE, bordercolor=RULE, borderwidth=1,
+                    font=dict(color=TEXT)),
+        hoverlabel=dict(bgcolor=SURFACE2, font=dict(color=TEXT)),
+        margin=dict(l=60, r=20, t=60, b=50),
+    )
+)
+pio.templates["bloomberg"] = PLOTLY_TEMPLATE
+pio.templates.default = "bloomberg"
 
 
 # ── Data helpers ───────────────────────────────────────────────────────────────
@@ -103,12 +253,12 @@ def build_dataset(start, end):
 
 def compute_features(weekly):
     out = weekly.copy()
-    out["Log_Return"]  = np.log(out["Close"] / out["Close"].shift(1))
-    out["Volatility"]  = out["Log_Return"].rolling(4).std()
+    out["Log_Return"]   = np.log(out["Close"] / out["Close"].shift(1))
+    out["Volatility"]   = out["Log_Return"].rolling(4).std()
     ma10 = out["Close"].rolling(10).mean()
     ma40 = out["Close"].rolling(40).mean()
     out["MA_Crossover"] = (ma10 - ma40) / out["Close"]
-    out["VIX_Change"]  = out["VIX"].pct_change()
+    out["VIX_Change"]   = out["VIX"].pct_change()
     return out[FEATURE_COLS + ["Close"]].replace([np.inf, -np.inf], np.nan).dropna()
 
 
@@ -239,29 +389,60 @@ def perf_metrics(df):
     }
 
 
-# ── Page ───────────────────────────────────────────────────────────────────────
-st.title("📈 Market Regime Dashboard")
-st.caption(
-    f"S&P 500 weekly regime detection · "
-    f"Trained {TRAIN_START} to {TRAIN_END} · "
-    f"Out-of-sample {TEST_START} to {TEST_END}"
+# ── Header ─────────────────────────────────────────────────────────────────────
+st.markdown(
+    f"""
+    <div style="display:flex; align-items:center; justify-content:space-between;
+                padding: 6px 0 14px 0;">
+      <div>
+        <div style="color:{GOLD}; font-size:11px; font-weight:700;
+                    letter-spacing:1px; text-transform:uppercase;">
+          MARKET REGIME DETECTION  ·  CAPSTONE LIVE DASHBOARD
+        </div>
+        <div style="color:{TEXT}; font-size:34px; font-weight:700;
+                    border-left: 5px solid {GOLD}; padding-left:14px; margin-top:6px;">
+          S&P 500 · Regime Dashboard
+        </div>
+        <div style="color:{SUBTEXT}; font-size:13px; margin-top:6px;">
+          Trained {TRAIN_START} → {TRAIN_END}  ·  Out-of-sample {TEST_START} → {TEST_END}
+        </div>
+      </div>
+    </div>
+    <hr style="border:none; border-top:1px solid {RULE}; margin: 4px 0 18px 0;">
+    """,
+    unsafe_allow_html=True,
 )
 
 with st.sidebar:
-    st.header("Settings")
+    st.markdown(
+        f"<div style='color:{GOLD}; font-weight:700; font-size:11px;"
+        f" letter-spacing:1px;'>CONTROLS</div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(f"<h3 style='color:{TEXT}; margin-top:0;'>Settings</h3>",
+                unsafe_allow_html=True)
     model_choice = st.radio("Model", ["GMM", "HMM"], horizontal=True)
     k_choice     = st.radio("Regimes", ["K=2  (Risk-ON / Risk-OFF)", "K=3  (Bull / Neutral / Bear)"])
-    st.markdown("---")
+    st.markdown(f"<hr style='border-color:{RULE}'>", unsafe_allow_html=True)
     st.markdown(
-        "**Features**\n\n"
-        "- Log return\n"
-        "- 4-week volatility\n"
-        "- MA crossover (10w - 40w)\n"
-        "- VIX change\n"
-        "- Term spread (10y - 2y)"
+        f"<div style='color:{GOLD}; font-weight:700; font-size:10px;"
+        f" letter-spacing:1px;'>FEATURES</div>",
+        unsafe_allow_html=True,
     )
-    st.markdown("---")
-    if st.button("Refresh data"):
+    st.markdown(
+        f"""
+        <div style='color:{TEXT}; font-size:12.5px; line-height:1.7;'>
+        ▪ Log Return<br>
+        ▪ 4-week Volatility<br>
+        ▪ MA Crossover (10w − 40w)<br>
+        ▪ VIX Change<br>
+        ▪ Term spread (10y − 2y)
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown(f"<hr style='border-color:{RULE}'>", unsafe_allow_html=True)
+    if st.button("🔄 Refresh data"):
         st.cache_data.clear()
         st.rerun()
 
@@ -316,7 +497,7 @@ with tab_state:
             prev_date, prev_reg = preds["price"].index[i], regime.iloc[i]
     fig.add_trace(
         go.Scatter(x=preds["price"].index, y=preds["price"].values,
-                   mode="lines", name="S&P 500", line=dict(color="black", width=2)),
+                   mode="lines", name="S&P 500", line=dict(color=GOLD, width=2)),
         row=1, col=1,
     )
     for r, c in colors.items():
@@ -325,7 +506,7 @@ with tab_state:
             fig.add_trace(
                 go.Scatter(x=preds["price"].index[idx], y=preds["price"].values[idx],
                            mode="markers", name=r,
-                           marker=dict(color=c, size=8, line=dict(width=0.5, color="white"))),
+                           marker=dict(color=c, size=9, line=dict(width=0.6, color=BG))),
                 row=1, col=1,
             )
     fig.add_trace(
@@ -334,15 +515,26 @@ with tab_state:
                showlegend=False, name="Confidence"),
         row=2, col=1,
     )
-    fig.add_hline(y=0.8, line_dash="dash", line_color="gray", row=2, col=1)
-    fig.update_layout(height=700, hovermode="x unified", legend=dict(orientation="h", y=1.05))
+    fig.add_hline(y=0.8, line_dash="dash", line_color=SUBTEXT, row=2, col=1)
+    fig.update_layout(height=700, hovermode="x unified",
+                      legend=dict(orientation="h", y=1.05))
     fig.update_yaxes(title="S&P 500",    row=1, col=1)
     fig.update_yaxes(title="Confidence", range=[0, 1.05], row=2, col=1)
     st.plotly_chart(fig, use_container_width=True)
-    st.info(
-        f"**Current call:** {model_choice} (K={K}) classifies the market as "
-        f"**{latest_regime}** at {latest_conf:.1%} confidence, "
-        f"holding for {weeks_in} consecutive week(s)."
+
+    st.markdown(
+        f"""
+        <div style="background:{SURFACE2}; border-left:4px solid {CYAN};
+                    padding:14px 18px; border-radius:4px; color:{TEXT};
+                    margin-top:6px;">
+          <b style="color:{CYAN};">CURRENT CALL</b> &nbsp; · &nbsp;
+          {model_choice} (K={K}) classifies the market as
+          <b style="color:{colors[latest_regime]};">{latest_regime}</b>
+          at <b>{latest_conf:.1%}</b> confidence,
+          holding for <b>{weeks_in}</b> consecutive week(s).
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
 # ── Tab 2: Backtest ────────────────────────────────────────────────────────────
@@ -357,7 +549,7 @@ with tab_bt:
         if cur_reg != prev_reg or i == len(reg_series) - 1:
             fig.add_vrect(
                 x0=str(prev_date), x1=str(bt.index[i]),
-                fillcolor=colors[prev_reg], opacity=0.18,
+                fillcolor=colors[prev_reg], opacity=0.16,
                 layer="below", line_width=0,
             )
             prev_date, prev_reg = bt.index[i], cur_reg
@@ -365,12 +557,12 @@ with tab_bt:
     # Strategy & B&H (left axis)
     fig.add_trace(
         go.Scatter(x=bt.index, y=bt["cum_strat"], mode="lines",
-                   name="Strategy", line=dict(color="#1565C0", width=2)),
+                   name="Strategy", line=dict(color=GOLD, width=2.5)),
         secondary_y=False,
     )
     fig.add_trace(
         go.Scatter(x=bt.index, y=bt["cum_bnh"], mode="lines",
-                   name="Buy & Hold", line=dict(color="black", width=2, dash="dash")),
+                   name="Buy & Hold", line=dict(color=SUBTEXT, width=2, dash="dash")),
         secondary_y=False,
     )
 
@@ -378,7 +570,8 @@ with tab_bt:
     price_bt = preds["price"].reindex(bt.index)
     fig.add_trace(
         go.Scatter(x=price_bt.index, y=price_bt.values, mode="lines",
-                   name="S&P 500", line=dict(color="gray", width=1, dash="dot"), opacity=0.5),
+                   name="S&P 500", line=dict(color=CYAN, width=1, dash="dot"),
+                   opacity=0.55),
         secondary_y=True,
     )
 
@@ -388,23 +581,25 @@ with tab_bt:
     last_date   = bt.index[-1]
     fig.add_annotation(x=last_date, y=final_bnh,   text=f"${final_bnh:.3f}",
                        showarrow=False, xanchor="left", xshift=6,
-                       font=dict(color="black", size=12))
+                       font=dict(color=SUBTEXT, size=12))
     fig.add_annotation(x=last_date, y=final_strat, text=f"${final_strat:.3f}",
                        showarrow=False, xanchor="left", xshift=6,
-                       font=dict(color="#1565C0", size=12))
+                       font=dict(color=GOLD, size=12, family="Calibri"))
 
     # Regime colour legend patches
     for lbl, col in colors.items():
         fig.add_trace(go.Scatter(
             x=[None], y=[None], mode="markers",
-            marker=dict(size=12, color=col, symbol="square", opacity=0.4),
+            marker=dict(size=12, color=col, symbol="square", opacity=0.5),
             name=lbl, showlegend=True,
         ))
 
     fig.update_layout(
-        title=(
-            f"OUT-OF-SAMPLE Backtest -- {TEST_START} to {TEST_END}<br>"
-            f"<sup>{model_choice} K={K} OOS ({TEST_START} to {TEST_END})</sup>"
+        title=dict(
+            text=(f"<b>OUT-OF-SAMPLE BACKTEST</b>  ·  {TEST_START} → {TEST_END}"
+                  f"<br><span style='font-size:11px; color:{SUBTEXT};'>"
+                  f"{model_choice} K={K}  ·  Regime-aware allocation vs Buy & Hold</span>"),
+            font=dict(color=GOLD),
         ),
         xaxis_title="Date", height=520, hovermode="x unified",
         legend=dict(orientation="h", y=1.08),
@@ -418,20 +613,22 @@ with tab_bt:
     dd_bnh   = (bt["cum_bnh"]   - bt["cum_bnh"].cummax())   / bt["cum_bnh"].cummax()
     fig_dd = go.Figure()
     fig_dd.add_trace(go.Scatter(x=dd_strat.index, y=dd_strat * 100, mode="lines",
-                                name="Strategy",   line=dict(color="#1565C0"), fill="tozeroy"))
+                                name="Strategy",   line=dict(color=GOLD, width=2),
+                                fill="tozeroy", fillcolor="rgba(229,181,61,0.2)"))
     fig_dd.add_trace(go.Scatter(x=dd_bnh.index,   y=dd_bnh   * 100, mode="lines",
-                                name="Buy & Hold", line=dict(color="gray")))
-    fig_dd.update_layout(title="Drawdown (%)", yaxis_title="Drawdown (%)",
-                         height=300, hovermode="x unified")
+                                name="Buy & Hold", line=dict(color=SUBTEXT, dash="dash")))
+    fig_dd.update_layout(title=dict(text="<b>Drawdown (%)</b>", font=dict(color=GOLD)),
+                         yaxis_title="Drawdown (%)", height=300, hovermode="x unified")
     st.plotly_chart(fig_dd, use_container_width=True)
 
-    st.subheader("Performance Metrics")
+    st.markdown(f"<h3 style='color:{GOLD};'>Performance Metrics</h3>",
+                unsafe_allow_html=True)
     rows = [
-        ["CAGR",                 f"{metrics['Strategy CAGR']:.2%}",   f"{metrics['Buy & Hold CAGR']:.2%}"],
+        ["CAGR",                  f"{metrics['Strategy CAGR']:.2%}",   f"{metrics['Buy & Hold CAGR']:.2%}"],
         ["Annualised Volatility", f"{metrics['Strategy Vol']:.2%}",    f"{metrics['Buy & Hold Vol']:.2%}"],
         ["Sharpe Ratio",          f"{metrics['Strategy Sharpe']:.3f}", f"{metrics['Buy & Hold Sharpe']:.3f}"],
         ["Max Drawdown",          f"{metrics['Strategy Max DD']:.2%}", f"{metrics['Buy & Hold Max DD']:.2%}"],
-        ["Regime Switches",       f"{metrics['Switches']}",            "--"],
+        ["Regime Switches",       f"{metrics['Switches']}",            "—"],
     ]
     st.dataframe(pd.DataFrame(rows, columns=["Metric", "Strategy", "Buy & Hold"]),
                  use_container_width=True, hide_index=True)
@@ -460,33 +657,41 @@ with tab_diag:
         order   = sorted(lbl_map, key=lambda s: labels.index(lbl_map[s]))
         trans   = m.transmat_[np.ix_(order, order)]
 
-        st.subheader("HMM Transition Matrix")
+        st.markdown(f"<h3 style='color:{GOLD};'>HMM Transition Matrix</h3>",
+                    unsafe_allow_html=True)
         fig = go.Figure(data=go.Heatmap(
-            z=trans, x=[f"-> {l}" for l in labels], y=labels,
-            colorscale="Blues", zmin=0, zmax=1,
+            z=trans, x=[f"→ {l}" for l in labels], y=labels,
+            colorscale=[[0, SURFACE], [0.5, "#3D7BB8"], [1, GOLD]],
+            zmin=0, zmax=1,
             text=[[f"{v:.3f}" for v in row] for row in trans],
-            texttemplate="%{text}", textfont={"size": 16},
+            texttemplate="%{text}",
+            textfont={"size": 16, "color": TEXT, "family": "Calibri"},
+            colorbar=dict(tickfont=dict(color=SUBTEXT)),
         ))
         fig.update_layout(height=380, yaxis=dict(autorange="reversed"))
         st.plotly_chart(fig, use_container_width=True)
         cols = st.columns(K)
         for col, lbl, p in zip(cols, labels, np.diag(trans)):
-            col.metric(f"Expected dwell -- {lbl}", f"{1 / (1 - p + 1e-10):.1f} weeks")
+            col.metric(f"Expected dwell · {lbl}", f"{1 / (1 - p + 1e-10):.1f} weeks")
     else:
-        st.info("Transition matrix is meaningful only for HMM -- switch to HMM in the sidebar.")
+        st.info("Transition matrix is meaningful only for HMM — switch to HMM in the sidebar.")
 
-    st.subheader("Regime Distribution (OOS)")
+    st.markdown(f"<h3 style='color:{GOLD};'>Regime Distribution (OOS)</h3>",
+                unsafe_allow_html=True)
     dist = regime.value_counts(normalize=True).mul(100).round(1)
     fig = go.Figure(go.Bar(
         x=dist.index, y=dist.values,
         marker_color=[colors[r] for r in dist.index],
+        marker_line_color=BG, marker_line_width=2,
         text=[f"{v}%" for v in dist.values], textposition="outside",
+        textfont=dict(color=TEXT),
     ))
     fig.update_layout(yaxis_title="% of weeks", height=350,
                       yaxis=dict(range=[0, max(dist.values) * 1.2]))
     st.plotly_chart(fig, use_container_width=True)
 
-    st.subheader("Mean Feature Values per Regime (Training)")
+    st.markdown(f"<h3 style='color:{GOLD};'>Mean Feature Values per Regime (Training)</h3>",
+                unsafe_allow_html=True)
     X_tr         = models["X_train"]
     train_states = models[key].predict(X_tr.values)
     train_regime = pd.Series(train_states, index=X_tr.index).map(models[f"{key}_map"])
@@ -497,7 +702,16 @@ with tab_diag:
     )
     st.dataframe(feat_means, use_container_width=True)
 
-st.caption(
-    "First load trains 4 models from scratch (~60s). "
-    "Models are cached for the session. Click Refresh data in the sidebar for latest prices."
+# ── Footer ─────────────────────────────────────────────────────────────────────
+st.markdown(
+    f"""
+    <hr style="border:none; border-top:1px solid {RULE}; margin-top:32px;">
+    <div style="display:flex; justify-content:space-between; padding:8px 0;
+                color:{SUBTEXT}; font-size:10px; font-weight:700;
+                letter-spacing:0.6px;">
+      <div>MARKET REGIME DETECTION  ·  CAPSTONE LIVE DASHBOARD</div>
+      <div style="color:{GOLD};">FIRST LOAD ~60s  ·  CACHED PER SESSION</div>
+    </div>
+    """,
+    unsafe_allow_html=True,
 )
