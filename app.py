@@ -242,31 +242,63 @@ def train_models():
     X_train        = prep.fit_transform(train_features[FEATURE_COLS])
     Xv             = X_train.values
 
-    # GMM K=3 — pick lowest BIC across covariance types and seeds (slim grid)
-    best_gmm, best_gmm_bic = None, np.inf
-    for cov in ("full", "tied", "diag"):
-        for seed in range(5):
+    # ── GMM K=3 — same grid as notebook §8 ────────────────────────────────────
+    best_gmm, best_gmm_bic, best_gmm_cov = None, np.inf, "full"
+    for cov in ("full", "tied", "diag", "spherical"):
+        for reg in (1e-6, 1e-5, 1e-4):
             try:
-                m = GaussianMixture(n_components=3, covariance_type=cov,
-                                    reg_covar=1e-5, n_init=10,
-                                    random_state=seed).fit(Xv)
+                m = GaussianMixture(
+                    n_components=3, covariance_type=cov,
+                    reg_covar=reg, n_init=15, tol=1e-3,
+                    max_iter=500, random_state=42,
+                ).fit(Xv)
                 if m.bic(Xv) < best_gmm_bic:
-                    best_gmm, best_gmm_bic = m, m.bic(Xv)
+                    best_gmm, best_gmm_bic, best_gmm_cov = m, m.bic(Xv), cov
             except Exception:
                 continue
 
-    # HMM K=3 — multi-seed Baum-Welch, lowest BIC across covariance types
-    best_hmm, best_hmm_bic, best_hmm_cov = None, np.inf, "full"
-    for cov in ("full", "tied", "diag"):
-        for seed in range(12):
-            try:
-                m = GaussianHMM(n_components=3, covariance_type=cov,
-                                n_iter=300, tol=1e-4, random_state=seed).fit(Xv)
-                bic = bic_hmm(m, Xv, cov)
-                if bic < best_hmm_bic:
-                    best_hmm, best_hmm_bic, best_hmm_cov = m, bic, cov
-            except Exception:
-                continue
+    # ── HMM K=3 — two-stage, exactly like notebook §9 + §9.1 ──────────────────
+    # Stage 1: grid search across (cov × n_iter) with 15 seeds per combo,
+    #          keep best LL per combo, then pick lowest BIC across combos.
+    SEEDS_GRID  = 15
+    best_combo  = None  # (cov_type, n_iter, BIC)
+    best_combo_bic = np.inf
+    for cov in ("full", "tied", "diag", "spherical"):
+        for n_iter in (100, 200, 300):
+            best_ll_combo, best_m_combo = -np.inf, None
+            for seed in range(SEEDS_GRID):
+                try:
+                    m = GaussianHMM(
+                        n_components=3, covariance_type=cov,
+                        n_iter=n_iter, tol=1e-4, random_state=seed,
+                    ).fit(Xv)
+                    ll = m.score(Xv)
+                    if ll > best_ll_combo:
+                        best_ll_combo, best_m_combo = ll, m
+                except Exception:
+                    continue
+            if best_m_combo is not None:
+                bic = bic_hmm(best_m_combo, Xv, cov)
+                if bic < best_combo_bic:
+                    best_combo_bic = bic
+                    best_combo     = (cov, n_iter)
+
+    # Stage 2: refit BIC-winning config across 10 seeds, keep best LL.
+    hmm_cov, hmm_n_iter = best_combo
+    best_hmm, best_total_ll = None, -np.inf
+    for seed in range(10):
+        try:
+            m = GaussianHMM(
+                n_components=3, covariance_type=hmm_cov,
+                n_iter=hmm_n_iter, tol=1e-4, random_state=seed,
+            ).fit(Xv)
+            ll = m.score(Xv)
+            if ll > best_total_ll:
+                best_total_ll, best_hmm = ll, m
+        except Exception:
+            continue
+    best_hmm_bic = bic_hmm(best_hmm, Xv, hmm_cov)
+    best_hmm_cov = hmm_cov
 
     ret = train_features.loc[X_train.index, "Log_Return"]
     vol = train_features.loc[X_train.index, "Volatility"]
