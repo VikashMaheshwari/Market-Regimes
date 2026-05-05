@@ -201,21 +201,45 @@ class Preprocessor:
         self.lower_q, self.upper_q, self.smooth_window = lower_q, upper_q, smooth_window
         self.scaler = StandardScaler()
 
+    @staticmethod
+    def _clean(X):
+        """Force numeric float64 and drop bad rows. sklearn 1.5+ on Py3.14 is strict."""
+        df = X[FEATURE_COLS].apply(pd.to_numeric, errors="coerce")
+        df = df.replace([np.inf, -np.inf], np.nan).dropna()
+        return df.astype(np.float64)
+
     def fit(self, X):
-        df = X[FEATURE_COLS].replace([np.inf, -np.inf], np.nan).dropna()
+        df = self._clean(X)
+        if df.empty:
+            raise ValueError(
+                f"Preprocessor.fit: empty after cleaning. "
+                f"Input rows={len(X)}, cols={list(X.columns)}. "
+                f"Likely missing term_spread (FRED unreachable) or all-NaN VIX_Change."
+            )
         self.lower_ = df.quantile(self.lower_q)
         self.upper_ = df.quantile(self.upper_q)
         self.feature_names_ = list(df.columns)
         clipped  = df.clip(self.lower_, self.upper_, axis=1)
-        smoothed = clipped.rolling(self.smooth_window, min_periods=self.smooth_window).mean().dropna()
-        self.scaler.fit(smoothed.values)
+        smoothed = clipped.rolling(self.smooth_window,
+                                    min_periods=self.smooth_window).mean().dropna()
+        if smoothed.empty:
+            raise ValueError(
+                f"Preprocessor.fit: smoothed dataframe is empty "
+                f"(input had {len(df)} rows; smooth_window={self.smooth_window})."
+            )
+        arr = np.ascontiguousarray(smoothed.values, dtype=np.float64)
+        self.scaler.fit(arr)
         return self
 
     def transform(self, X):
-        df = X[self.feature_names_].replace([np.inf, -np.inf], np.nan)
+        df = X[self.feature_names_].apply(pd.to_numeric, errors="coerce")
+        df = df.replace([np.inf, -np.inf], np.nan)
         clipped  = df.clip(self.lower_, self.upper_, axis=1)
-        smoothed = clipped.rolling(self.smooth_window, min_periods=self.smooth_window).mean().dropna()
-        return pd.DataFrame(self.scaler.transform(smoothed.values),
+        smoothed = clipped.rolling(self.smooth_window,
+                                    min_periods=self.smooth_window).mean().dropna()
+        smoothed = smoothed.astype(np.float64)
+        arr = np.ascontiguousarray(smoothed.values, dtype=np.float64)
+        return pd.DataFrame(self.scaler.transform(arr),
                             index=smoothed.index, columns=self.feature_names_)
 
     def fit_transform(self, X):
