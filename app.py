@@ -44,9 +44,7 @@ GREEN    = "#4CAF50"
 ORANGE   = "#FFB74D"
 RED      = "#EF5350"
 
-COLORS_K2 = {"Risk-OFF": RED, "Risk-ON": GREEN}
 COLORS_K3 = {"Bear": RED, "Neutral": ORANGE, "Bull": GREEN}
-ALLOC_K2  = {"Risk-ON": 1.0, "Risk-OFF": 0.0}
 ALLOC_K3  = {"Bull": 1.0, "Neutral": 0.5, "Bear": 0.0}
 
 st.set_page_config(
@@ -316,7 +314,6 @@ def train_models():
         return best
 
     gmm3, hmm3 = best_gmm(3), best_hmm(3)
-    gmm2, hmm2 = best_gmm(2), best_hmm(2)
     ret = train_features.loc[X_train.index, "Log_Return"]
 
     def make_map(states, labels):
@@ -327,8 +324,6 @@ def train_models():
         "prep": prep, "X_train": X_train, "train_features": train_features,
         "gmm3": gmm3, "gmm3_map": make_map(gmm3.predict(Xv), ["Bear", "Neutral", "Bull"]),
         "hmm3": hmm3, "hmm3_map": make_map(hmm3.predict(Xv), ["Bear", "Neutral", "Bull"]),
-        "gmm2": gmm2, "gmm2_map": make_map(gmm2.predict(Xv), ["Risk-OFF", "Risk-ON"]),
-        "hmm2": hmm2, "hmm2_map": make_map(hmm2.predict(Xv), ["Risk-OFF", "Risk-ON"]),
     }
 
 
@@ -345,13 +340,13 @@ def get_predictions():
         "log_ret": pred_features.loc[X_pred.index, "Log_Return"],
         "X_train": models["X_train"],
     }
-    for key in ("gmm2", "gmm3", "hmm2", "hmm3"):
+    for key in ("gmm3", "hmm3"):
         m      = models[key]
         lbl    = models[f"{key}_map"]
         states = m.predict(X_pred.values)
         proba  = m.predict_proba(X_pred.values)
         out[key] = {
-            "K":          2 if key.endswith("2") else 3,
+            "K":          3,
             "regime":     pd.Series(states, index=X_pred.index).map(lbl),
             "confidence": pd.Series(proba.max(axis=1), index=X_pred.index),
         }
@@ -422,7 +417,12 @@ with st.sidebar:
     st.markdown(f"<h3 style='color:{TEXT}; margin-top:0;'>Settings</h3>",
                 unsafe_allow_html=True)
     model_choice = st.radio("Model", ["GMM", "HMM"], horizontal=True)
-    k_choice     = st.radio("Regimes", ["K=2  (Risk-ON / Risk-OFF)", "K=3  (Bull / Neutral / Bear)"])
+    st.markdown(
+        f"<div style='color:{SUBTEXT}; font-size:11px; margin-top:6px;'>"
+        f"Regimes: <b style='color:{GOLD};'>K = 3</b>  ·  Bull / Neutral / Bear"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
     st.markdown(f"<hr style='border-color:{RULE}'>", unsafe_allow_html=True)
     st.markdown(
         f"<div style='color:{GOLD}; font-weight:700; font-size:10px;"
@@ -448,11 +448,11 @@ with st.sidebar:
 
 preds  = get_predictions()
 models = train_models()
-key    = ("gmm" if model_choice == "GMM" else "hmm") + ("2" if "K=2" in k_choice else "3")
+key    = "gmm3" if model_choice == "GMM" else "hmm3"
 active = preds[key]
 regime, confidence, K = active["regime"], active["confidence"], active["K"]
-colors = COLORS_K2 if K == 2 else COLORS_K3
-alloc  = ALLOC_K2  if K == 2 else ALLOC_K3
+colors = COLORS_K3
+alloc  = ALLOC_K3
 
 # ── KPI strip ──────────────────────────────────────────────────────────────────
 latest_regime = regime.iloc[-1]
@@ -652,7 +652,7 @@ with tab_table:
 with tab_diag:
     if model_choice == "HMM":
         m       = models[key]
-        labels  = ["Risk-OFF", "Risk-ON"] if K == 2 else ["Bear", "Neutral", "Bull"]
+        labels  = ["Bear", "Neutral", "Bull"]
         lbl_map = models[f"{key}_map"]
         order   = sorted(lbl_map, key=lambda s: labels.index(lbl_map[s]))
         trans   = m.transmat_[np.ix_(order, order)]
