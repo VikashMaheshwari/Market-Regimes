@@ -1,6 +1,15 @@
 """
-S&P 500 Market Regime Dashboard — Bloomberg/finance-pro dark theme.
-Self-contained; fetches data and retrains models on first load (~60 s).
+S&P 500 Market Regime Dashboard — mirrors the capstone notebook end-to-end.
+
+Sections (tabs) are aligned with the notebook:
+  1. Current State          → live regime call + S&P with regime shading
+  2. EDA                    → price/volume, returns vs normal, feature corr
+  3. Model Selection        → GMM vs HMM (BIC, LL, transition matrix)
+  4. Backtest               → IS + OOS equity curve, drawdown, metrics
+  5. Statistical Validation → ANOVA, Levene
+  6. Predictions            → table + CSV download
+
+Self-contained — fetches data and retrains models on first load (~60 s).
 Deploy to Streamlit Community Cloud with only app.py + requirements.txt.
 """
 import warnings
@@ -17,12 +26,14 @@ import yfinance as yf
 from dateutil.relativedelta import relativedelta
 from hmmlearn.hmm import GaussianHMM
 from plotly.subplots import make_subplots
+from scipy import stats
+from scipy.stats import f_oneway, levene
 from sklearn.mixture import GaussianMixture
 from sklearn.preprocessing import StandardScaler
 
 warnings.filterwarnings("ignore")
 
-# ── Config ─────────────────────────────────────────────────────────────────────
+# ── Config — same as notebook ──────────────────────────────────────────────────
 TRAIN_START  = "2010-01-01"
 TRAIN_END    = "2024-12-31"
 TEST_START   = "2025-01-01"
@@ -30,8 +41,9 @@ TEST_END     = date.today().strftime("%Y-%m-%d")
 PRED_START   = (pd.Timestamp(TEST_START) - relativedelta(months=12)).strftime("%Y-%m-%d")
 FEATURE_COLS = ["Log_Return", "Volatility", "MA_Crossover", "VIX_Change", "term_spread"]
 COST_BPS     = 5 / 10_000
+ALLOC        = {"Bull": 1.0, "Neutral": 0.5, "Bear": 0.0}
 
-# ── Theme ──────────────────────────────────────────────────────────────────────
+# ── Theme — Bloomberg-style ────────────────────────────────────────────────────
 BG       = "#0B1929"
 SURFACE  = "#152844"
 SURFACE2 = "#1B3355"
@@ -43,9 +55,7 @@ CYAN     = "#4FC3F7"
 GREEN    = "#4CAF50"
 ORANGE   = "#FFB74D"
 RED      = "#EF5350"
-
-COLORS_K3 = {"Bear": RED, "Neutral": ORANGE, "Bull": GREEN}
-ALLOC_K3  = {"Bull": 1.0, "Neutral": 0.5, "Bear": 0.0}
+COLORS   = {"Bear": RED, "Neutral": ORANGE, "Bull": GREEN}
 
 st.set_page_config(
     page_title="Market Regime Dashboard",
@@ -54,139 +64,70 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ── Custom CSS — Bloomberg-style dark UI ───────────────────────────────────────
+# ── CSS ────────────────────────────────────────────────────────────────────────
 st.markdown(f"""
 <style>
-    /* App background */
-    .stApp {{
-        background-color: {BG};
-        color: {TEXT};
-    }}
-    /* Top gold accent bar */
-    .stApp > header {{
-        background-color: {BG};
-        border-bottom: 3px solid {GOLD};
-    }}
-    /* Sidebar */
+    .stApp {{ background-color: {BG}; color: {TEXT}; }}
+    .stApp > header {{ background-color: {BG}; border-bottom: 3px solid {GOLD}; }}
     section[data-testid="stSidebar"] {{
         background-color: {SURFACE};
         border-right: 1px solid {RULE};
     }}
-    section[data-testid="stSidebar"] * {{
-        color: {TEXT};
-    }}
-    /* Headings */
-    h1, h2, h3, h4 {{
-        color: {TEXT} !important;
-        font-family: "Calibri", sans-serif;
-    }}
-    h1 {{
-        border-left: 5px solid {GOLD};
-        padding-left: 14px;
-        margin-bottom: 0.2rem;
-    }}
-    /* Caption / small text */
-    .stCaption, p, .stMarkdown {{
-        color: {SUBTEXT};
-    }}
-    /* Metric cards */
+    section[data-testid="stSidebar"] * {{ color: {TEXT}; }}
+    h1, h2, h3, h4 {{ color: {TEXT} !important; font-family: "Calibri", sans-serif; }}
+    .stCaption, p, .stMarkdown {{ color: {SUBTEXT}; }}
     div[data-testid="stMetric"] {{
-        background-color: {SURFACE};
-        border: 1px solid {RULE};
-        border-left: 4px solid {GOLD};
-        padding: 14px 18px;
-        border-radius: 6px;
+        background-color: {SURFACE}; border: 1px solid {RULE};
+        border-left: 4px solid {GOLD}; padding: 14px 18px; border-radius: 6px;
     }}
     div[data-testid="stMetric"] label {{
-        color: {SUBTEXT} !important;
-        font-size: 10px !important;
-        font-weight: 700 !important;
-        text-transform: uppercase;
-        letter-spacing: 0.5px;
+        color: {SUBTEXT} !important; font-size: 10px !important;
+        font-weight: 700 !important; text-transform: uppercase; letter-spacing: 0.5px;
     }}
     div[data-testid="stMetricValue"] {{
-        color: {GOLD} !important;
-        font-size: 28px !important;
-        font-weight: 700 !important;
+        color: {GOLD} !important; font-size: 26px !important; font-weight: 700 !important;
     }}
-    div[data-testid="stMetricDelta"] {{
-        color: {CYAN} !important;
-    }}
-    /* Tabs */
-    .stTabs [data-baseweb="tab-list"] {{
-        gap: 0px;
-        border-bottom: 1px solid {RULE};
-    }}
+    div[data-testid="stMetricDelta"] {{ color: {CYAN} !important; }}
+    .stTabs [data-baseweb="tab-list"] {{ gap: 0; border-bottom: 1px solid {RULE}; }}
     .stTabs [data-baseweb="tab"] {{
-        background-color: transparent;
-        color: {SUBTEXT};
-        border-radius: 0;
-        padding: 12px 24px;
-        font-weight: 600;
+        background-color: transparent; color: {SUBTEXT};
+        border-radius: 0; padding: 12px 22px; font-weight: 600;
     }}
     .stTabs [aria-selected="true"] {{
-        color: {GOLD} !important;
-        border-bottom: 3px solid {GOLD} !important;
+        color: {GOLD} !important; border-bottom: 3px solid {GOLD} !important;
         background-color: {SURFACE};
     }}
-    /* Buttons */
     .stButton button {{
-        background-color: {GOLD};
-        color: {BG};
-        border: none;
-        font-weight: 700;
-        border-radius: 4px;
+        background-color: {GOLD}; color: {BG};
+        border: none; font-weight: 700; border-radius: 4px;
     }}
-    .stButton button:hover {{
-        background-color: #c89a25;
-        color: {BG};
-    }}
-    /* Dataframe */
-    .stDataFrame {{
-        background-color: {SURFACE};
-        border: 1px solid {RULE};
-        border-radius: 4px;
-    }}
-    /* Info / alert boxes */
+    .stButton button:hover {{ background-color: #c89a25; color: {BG}; }}
+    .stDataFrame {{ background-color: {SURFACE}; border: 1px solid {RULE}; border-radius: 4px; }}
     div[data-testid="stAlert"] {{
-        background-color: {SURFACE2};
-        border-left: 4px solid {CYAN};
-        color: {TEXT};
+        background-color: {SURFACE2}; border-left: 4px solid {CYAN}; color: {TEXT};
     }}
-    /* Slider */
-    .stSlider [data-baseweb="slider"] [role="slider"] {{
-        background-color: {GOLD};
-    }}
-    /* Radio */
-    .stRadio label {{
-        color: {TEXT} !important;
-    }}
-    /* Hide Streamlit branding */
-    #MainMenu {{visibility: hidden;}}
-    footer {{visibility: hidden;}}
+    .stRadio label {{ color: {TEXT} !important; }}
+    #MainMenu {{ visibility: hidden; }}
+    footer {{ visibility: hidden; }}
 </style>
 """, unsafe_allow_html=True)
 
-# ── Plotly dark template ───────────────────────────────────────────────────────
-PLOTLY_TEMPLATE = dict(
-    layout=dict(
-        paper_bgcolor=BG,
-        plot_bgcolor=SURFACE,
-        font=dict(color=TEXT, family="Calibri"),
-        title=dict(font=dict(color=TEXT, size=14)),
-        xaxis=dict(gridcolor=RULE, zerolinecolor=RULE, color=SUBTEXT),
-        yaxis=dict(gridcolor=RULE, zerolinecolor=RULE, color=SUBTEXT),
-        legend=dict(bgcolor=SURFACE, bordercolor=RULE, borderwidth=1,
-                    font=dict(color=TEXT)),
-        hoverlabel=dict(bgcolor=SURFACE2, font=dict(color=TEXT)),
-        margin=dict(l=60, r=20, t=60, b=50),
-    )
-)
-pio.templates["bloomberg"] = PLOTLY_TEMPLATE
+# ── Plotly theme ───────────────────────────────────────────────────────────────
+pio.templates["bloomberg"] = dict(layout=dict(
+    paper_bgcolor=BG, plot_bgcolor=SURFACE,
+    font=dict(color=TEXT, family="Calibri"),
+    xaxis=dict(gridcolor=RULE, zerolinecolor=RULE, color=SUBTEXT),
+    yaxis=dict(gridcolor=RULE, zerolinecolor=RULE, color=SUBTEXT),
+    legend=dict(bgcolor=SURFACE, bordercolor=RULE, borderwidth=1, font=dict(color=TEXT)),
+    hoverlabel=dict(bgcolor=SURFACE2, font=dict(color=TEXT)),
+    margin=dict(l=60, r=20, t=60, b=50),
+))
 pio.templates.default = "bloomberg"
 
 
-# ── Data helpers ───────────────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+# DATA + FEATURES — same logic as the notebook
+# ═════════════════════════════════════════════════════════════════════════════
 def yf_close(ticker, start, end, name=None):
     df = yf.download(ticker, start=start, end=end, auto_adjust=True, progress=False)
     if df.empty:
@@ -197,12 +138,9 @@ def yf_close(ticker, start, end, name=None):
 
 
 def fetch_fred(series, start, end):
-    url = (
-        f"https://fred.stlouisfed.org/graph/fredgraph.csv"
-        f"?id={series}&observation_start={start}&observation_end={end}"
-    )
-    resp = requests.get(url, timeout=30)
-    resp.raise_for_status()
+    url = (f"https://fred.stlouisfed.org/graph/fredgraph.csv"
+           f"?id={series}&observation_start={start}&observation_end={end}")
+    resp = requests.get(url, timeout=30); resp.raise_for_status()
     df = pd.read_csv(StringIO(resp.text), parse_dates=["DATE"], index_col="DATE")
     df.index = pd.to_datetime(df.index).tz_localize(None)
     s = df.iloc[:, 0].replace(".", np.nan).astype(float).dropna()
@@ -210,15 +148,16 @@ def fetch_fred(series, start, end):
 
 
 def merge_backward(base, other, name, tolerance="7 days"):
+    """Time-asof join — never pulls future data."""
     base, other = base.copy(), other.copy()
-    idx_name = base.index.name or "Date"
-    base.index.name = other.index.name = idx_name
-    a = base.reset_index().sort_values(idx_name)
-    b = other.reset_index().sort_values(idx_name)
-    b.columns = [idx_name, name]
-    out = pd.merge_asof(a, b, on=idx_name, direction="backward",
+    idx = base.index.name or "Date"
+    base.index.name = other.index.name = idx
+    a = base.reset_index().sort_values(idx)
+    b = other.reset_index().sort_values(idx)
+    b.columns = [idx, name]
+    out = pd.merge_asof(a, b, on=idx, direction="backward",
                         tolerance=pd.Timedelta(tolerance))
-    return out.set_index(idx_name)
+    return out.set_index(idx)
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
@@ -228,23 +167,19 @@ def build_dataset(start, end):
         spy.columns = spy.columns.droplevel(1)
     spy = spy[["Open", "High", "Low", "Close", "Volume"]].copy()
     spy.index = pd.to_datetime(spy.index).tz_localize(None)
-
     vix = yf_close("^VIX", start, end, name="VIX")
     spy = spy.join(vix, how="inner")
-
     weekly = spy.resample("W-FRI").agg({
         "Open": "first", "High": "max", "Low": "min",
         "Close": "last", "Volume": "sum", "VIX": "last",
     }).dropna()
     weekly.index.name = "Date"
-
     try:
         term = fetch_fred("T10Y2Y", start, end).rename("term_spread")
     except Exception:
         t10 = yf_close("^TNX", start, end)
         t3m = yf_close("^IRX", start, end)
         term = (t10 - t3m).rename("term_spread")
-
     weekly = merge_backward(weekly, term, "term_spread")
     return weekly.replace([np.inf, -np.inf], np.nan).dropna()
 
@@ -257,10 +192,11 @@ def compute_features(weekly):
     ma40 = out["Close"].rolling(40).mean()
     out["MA_Crossover"] = (ma10 - ma40) / out["Close"]
     out["VIX_Change"]   = out["VIX"].pct_change()
-    return out[FEATURE_COLS + ["Close"]].replace([np.inf, -np.inf], np.nan).dropna()
+    return out[FEATURE_COLS + ["Close", "VIX"]].replace([np.inf, -np.inf], np.nan).dropna()
 
 
 class Preprocessor:
+    """Winsorize → smooth → scale (fit on train, freeze for prediction)."""
     def __init__(self, lower_q=0.01, upper_q=0.99, smooth_window=3):
         self.lower_q, self.upper_q, self.smooth_window = lower_q, upper_q, smooth_window
         self.scaler = StandardScaler()
@@ -286,8 +222,19 @@ class Preprocessor:
         return self.fit(X).transform(X)
 
 
-# ── Train all 4 models (cached for the full session) ──────────────────────────
-@st.cache_resource(show_spinner="Fetching data and training models — only happens once per session...")
+# ═════════════════════════════════════════════════════════════════════════════
+# MODELS — slim grid search, full-cov, BIC selection (same as notebook)
+# ═════════════════════════════════════════════════════════════════════════════
+def bic_hmm(model, X, cov_type="full"):
+    """Same formula as notebook."""
+    K, d = model.n_components, X.shape[1]
+    n_cov = {"full": K * d * (d + 1) // 2, "tied": d * (d + 1) // 2,
+             "diag": K * d, "spherical": K}[cov_type]
+    n_params = K * (K - 1) + K * d + n_cov
+    return -2 * model.score(X) + n_params * np.log(len(X))
+
+
+@st.cache_resource(show_spinner="Fetching data and training models — only happens once per session…")
 def train_models():
     train_df       = build_dataset(TRAIN_START, TRAIN_END)
     train_features = compute_features(train_df)
@@ -295,69 +242,93 @@ def train_models():
     X_train        = prep.fit_transform(train_features[FEATURE_COLS])
     Xv             = X_train.values
 
-    def best_gmm(K, seeds=5):
-        best, best_bic = None, np.inf
-        for s in range(seeds):
-            m = GaussianMixture(n_components=K, covariance_type="full",
-                                reg_covar=1e-3, n_init=10, random_state=s).fit(Xv)
-            if m.bic(Xv) < best_bic:
-                best, best_bic = m, m.bic(Xv)
-        return best
+    # GMM K=3 — pick lowest BIC across covariance types and seeds (slim grid)
+    best_gmm, best_gmm_bic = None, np.inf
+    for cov in ("full", "tied", "diag"):
+        for seed in range(5):
+            try:
+                m = GaussianMixture(n_components=3, covariance_type=cov,
+                                    reg_covar=1e-5, n_init=10,
+                                    random_state=seed).fit(Xv)
+                if m.bic(Xv) < best_gmm_bic:
+                    best_gmm, best_gmm_bic = m, m.bic(Xv)
+            except Exception:
+                continue
 
-    def best_hmm(K, seeds=10):
-        best, best_ll = None, -np.inf
-        for s in range(seeds):
-            m = GaussianHMM(n_components=K, covariance_type="full",
-                            n_iter=200, tol=1e-4, random_state=s).fit(Xv)
-            if m.score(Xv) > best_ll:
-                best, best_ll = m, m.score(Xv)
-        return best
+    # HMM K=3 — multi-seed Baum-Welch, lowest BIC across covariance types
+    best_hmm, best_hmm_bic, best_hmm_cov = None, np.inf, "full"
+    for cov in ("full", "tied", "diag"):
+        for seed in range(12):
+            try:
+                m = GaussianHMM(n_components=3, covariance_type=cov,
+                                n_iter=300, tol=1e-4, random_state=seed).fit(Xv)
+                bic = bic_hmm(m, Xv, cov)
+                if bic < best_hmm_bic:
+                    best_hmm, best_hmm_bic, best_hmm_cov = m, bic, cov
+            except Exception:
+                continue
 
-    gmm3, hmm3 = best_gmm(3), best_hmm(3)
     ret = train_features.loc[X_train.index, "Log_Return"]
+    vol = train_features.loc[X_train.index, "Volatility"]
 
-    def make_map(states, labels):
-        means = ret.groupby(states).mean().sort_values()
-        return {s: lbl for s, lbl in zip(means.index, labels)}
+    def label_map(states):
+        """Order clusters by (mean_return − mean_vol) → Bear/Neutral/Bull."""
+        rs = pd.DataFrame({
+            "ret": ret.groupby(states).mean(),
+            "vol": vol.groupby(states).mean(),
+        })
+        rs["score"] = rs["ret"] - rs["vol"]
+        order = rs["score"].sort_values().index.tolist()
+        return {order[0]: "Bear", order[1]: "Neutral", order[2]: "Bull"}
+
+    gmm_states = best_gmm.predict(Xv)
+    hmm_states = best_hmm.predict(Xv)
 
     return {
-        "prep": prep, "X_train": X_train, "train_features": train_features,
-        "gmm3": gmm3, "gmm3_map": make_map(gmm3.predict(Xv), ["Bear", "Neutral", "Bull"]),
-        "hmm3": hmm3, "hmm3_map": make_map(hmm3.predict(Xv), ["Bear", "Neutral", "Bull"]),
+        "prep": prep, "X_train": X_train, "train_df": train_df,
+        "train_features": train_features,
+        "gmm": best_gmm, "gmm_bic": best_gmm_bic,
+        "gmm_ll": best_gmm.score(Xv) * len(Xv),
+        "gmm_states": gmm_states,
+        "gmm_map": label_map(gmm_states),
+        "hmm": best_hmm, "hmm_bic": best_hmm_bic, "hmm_cov": best_hmm_cov,
+        "hmm_ll": best_hmm.score(Xv),
+        "hmm_states": hmm_states,
+        "hmm_map": label_map(hmm_states),
     }
 
 
-@st.cache_data(ttl=86400, show_spinner="Loading out-of-sample predictions...")
+@st.cache_data(ttl=86400, show_spinner="Loading out-of-sample predictions…")
 def get_predictions():
-    models        = train_models()
+    M             = train_models()
     pred_df       = build_dataset(PRED_START, TEST_END)
     pred_features = compute_features(pred_df)
-    X_pred        = models["prep"].transform(pred_features[FEATURE_COLS])
+    X_pred        = M["prep"].transform(pred_features[FEATURE_COLS])
     X_pred        = X_pred[X_pred.index >= TEST_START]
 
     out = {
-        "price":   pred_features.loc[X_pred.index, "Close"],
-        "log_ret": pred_features.loc[X_pred.index, "Log_Return"],
-        "X_train": models["X_train"],
+        "price":         pred_features.loc[X_pred.index, "Close"],
+        "log_ret":       pred_features.loc[X_pred.index, "Log_Return"],
+        "X_pred":        X_pred,
     }
-    for key in ("gmm3", "hmm3"):
-        m      = models[key]
-        lbl    = models[f"{key}_map"]
-        states = m.predict(X_pred.values)
-        proba  = m.predict_proba(X_pred.values)
+    for key, model, lblmap in (("gmm", M["gmm"], M["gmm_map"]),
+                                ("hmm", M["hmm"], M["hmm_map"])):
+        states = model.predict(X_pred.values)
+        proba  = model.predict_proba(X_pred.values)
         out[key] = {
-            "K":          3,
-            "regime":     pd.Series(states, index=X_pred.index).map(lbl),
+            "regime":     pd.Series(states, index=X_pred.index).map(lblmap),
             "confidence": pd.Series(proba.max(axis=1), index=X_pred.index),
         }
     return out
 
 
-# ── Backtest ───────────────────────────────────────────────────────────────────
-def run_backtest(regime_series, alloc_map, weekly_returns):
+# ═════════════════════════════════════════════════════════════════════════════
+# BACKTEST — same rule as notebook (1-week lag, 5 bps, Bull/Neutral/Bear alloc)
+# ═════════════════════════════════════════════════════════════════════════════
+def run_backtest(regime_series, weekly_returns):
     df = pd.DataFrame({"log_ret": weekly_returns, "regime": regime_series}).dropna()
     df["signal"]     = df["regime"].shift(1)
-    df["allocation"] = df["signal"].map(alloc_map).fillna(0)
+    df["allocation"] = df["signal"].map(ALLOC).fillna(0)
     df["strat_ret"]  = df["allocation"] * df["log_ret"]
     df["switched"]   = (df["signal"] != df["signal"].shift(1)).astype(int)
     df["strat_ret"] -= df["switched"] * COST_BPS
@@ -367,40 +338,43 @@ def run_backtest(regime_series, alloc_map, weekly_returns):
 
 
 def perf_metrics(df):
-    years  = max(len(df) / 52, 1e-9)
-    cagr_s = df["cum_strat"].iloc[-1] ** (1 / years) - 1
-    cagr_b = df["cum_bnh"].iloc[-1]   ** (1 / years) - 1
+    yrs    = max(len(df) / 52, 1e-9)
+    cagr_s = df["cum_strat"].iloc[-1] ** (1 / yrs) - 1
+    cagr_b = df["cum_bnh"].iloc[-1]   ** (1 / yrs) - 1
     vol_s  = df["strat_ret"].std() * np.sqrt(52)
     vol_b  = df["log_ret"].std()   * np.sqrt(52)
     def mdd(c): return ((c - c.cummax()) / c.cummax()).min()
+    mdd_s, mdd_b = mdd(df["cum_strat"]), mdd(df["cum_bnh"])
+    win_rate = (df["strat_ret"] > df["log_ret"]).mean()
     return {
-        "Strategy CAGR":     cagr_s,  "Buy & Hold CAGR":   cagr_b,
-        "Strategy Vol":      vol_s,   "Buy & Hold Vol":    vol_b,
-        "Strategy Sharpe":   cagr_s / vol_s if vol_s > 0 else 0,
-        "Buy & Hold Sharpe": cagr_b / vol_b if vol_b > 0 else 0,
-        "Strategy Max DD":   mdd(df["cum_strat"]),
-        "Buy & Hold Max DD": mdd(df["cum_bnh"]),
-        "Switches":          int(df["switched"].sum()),
+        "cagr_s": cagr_s, "cagr_b": cagr_b,
+        "vol_s":  vol_s,  "vol_b":  vol_b,
+        "shrp_s": cagr_s / vol_s if vol_s > 0 else 0,
+        "shrp_b": cagr_b / vol_b if vol_b > 0 else 0,
+        "mdd_s":  mdd_s,  "mdd_b":  mdd_b,
+        "calm_s": cagr_s / abs(mdd_s) if mdd_s != 0 else 0,
+        "calm_b": cagr_b / abs(mdd_b) if mdd_b != 0 else 0,
+        "win":    float(win_rate),
+        "switches": int(df["switched"].sum()),
     }
 
 
-# ── Header ─────────────────────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+# UI
+# ═════════════════════════════════════════════════════════════════════════════
 st.markdown(
     f"""
-    <div style="display:flex; align-items:center; justify-content:space-between;
-                padding: 6px 0 14px 0;">
-      <div>
-        <div style="color:{GOLD}; font-size:11px; font-weight:700;
-                    letter-spacing:1px; text-transform:uppercase;">
-          MARKET REGIME DETECTION  ·  CAPSTONE LIVE DASHBOARD
-        </div>
-        <div style="color:{TEXT}; font-size:34px; font-weight:700;
-                    border-left: 5px solid {GOLD}; padding-left:14px; margin-top:6px;">
-          S&P 500 · Regime Dashboard
-        </div>
-        <div style="color:{SUBTEXT}; font-size:13px; margin-top:6px;">
-          Trained {TRAIN_START} → {TRAIN_END}  ·  Out-of-sample {TEST_START} → {TEST_END}
-        </div>
+    <div style="padding: 6px 0 14px 0;">
+      <div style="color:{GOLD}; font-size:11px; font-weight:700; letter-spacing:1px;
+                  text-transform:uppercase;">
+        MARKET REGIME DETECTION  ·  CAPSTONE LIVE DASHBOARD
+      </div>
+      <div style="color:{TEXT}; font-size:34px; font-weight:700;
+                  border-left: 5px solid {GOLD}; padding-left:14px; margin-top:6px;">
+        S&P 500 · Regime Dashboard
+      </div>
+      <div style="color:{SUBTEXT}; font-size:13px; margin-top:6px;">
+        Trained {TRAIN_START} → {TRAIN_END}  ·  Out-of-sample {TEST_START} → {TEST_END}
       </div>
     </div>
     <hr style="border:none; border-top:1px solid {RULE}; margin: 4px 0 18px 0;">
@@ -416,7 +390,7 @@ with st.sidebar:
     )
     st.markdown(f"<h3 style='color:{TEXT}; margin-top:0;'>Settings</h3>",
                 unsafe_allow_html=True)
-    model_choice = st.radio("Model", ["GMM", "HMM"], horizontal=True)
+    model_choice = st.radio("Model", ["GMM", "HMM"], horizontal=True, index=1)
     st.markdown(
         f"<div style='color:{SUBTEXT}; font-size:11px; margin-top:6px;'>"
         f"Regimes: <b style='color:{GOLD};'>K = 3</b>  ·  Bull / Neutral / Bear"
@@ -430,15 +404,28 @@ with st.sidebar:
         unsafe_allow_html=True,
     )
     st.markdown(
-        f"""
-        <div style='color:{TEXT}; font-size:12.5px; line-height:1.7;'>
+        f"""<div style='color:{TEXT}; font-size:12.5px; line-height:1.7;'>
         ▪ Log Return<br>
         ▪ 4-week Volatility<br>
         ▪ MA Crossover (10w − 40w)<br>
         ▪ VIX Change<br>
         ▪ Term spread (10y − 2y)
-        </div>
-        """,
+        </div>""",
+        unsafe_allow_html=True,
+    )
+    st.markdown(f"<hr style='border-color:{RULE}'>", unsafe_allow_html=True)
+    st.markdown(
+        f"<div style='color:{GOLD}; font-weight:700; font-size:10px;"
+        f" letter-spacing:1px;'>STRATEGY RULE</div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f"""<div style='color:{TEXT}; font-size:12px; line-height:1.6;'>
+        Bull&nbsp;&nbsp;&nbsp;→ 100%<br>
+        Neutral → 50%<br>
+        Bear&nbsp;&nbsp;→ 0%<br>
+        <span style='color:{SUBTEXT};'>1-week lag · 5 bps cost</span>
+        </div>""",
         unsafe_allow_html=True,
     )
     st.markdown(f"<hr style='border-color:{RULE}'>", unsafe_allow_html=True)
@@ -446,24 +433,22 @@ with st.sidebar:
         st.cache_data.clear()
         st.rerun()
 
+M      = train_models()
 preds  = get_predictions()
-models = train_models()
-key    = "gmm3" if model_choice == "GMM" else "hmm3"
-active = preds[key]
-regime, confidence, K = active["regime"], active["confidence"], active["K"]
-colors = COLORS_K3
-alloc  = ALLOC_K3
+key    = "gmm" if model_choice == "GMM" else "hmm"
+regime = preds[key]["regime"]
+conf   = preds[key]["confidence"]
 
 # ── KPI strip ──────────────────────────────────────────────────────────────────
 latest_regime = regime.iloc[-1]
-latest_conf   = confidence.iloc[-1]
+latest_conf   = conf.iloc[-1]
 weeks_in = 1
 for r in regime.iloc[::-1][1:]:
     if r == latest_regime: weeks_in += 1
     else: break
 
-bt      = run_backtest(regime, alloc, preds["log_ret"])
-metrics = perf_metrics(bt)
+bt_oos  = run_backtest(regime, preds["log_ret"])
+m_oos   = perf_metrics(bt_oos)
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Current Regime",  latest_regime)
@@ -471,50 +456,54 @@ c2.metric("Confidence",      f"{latest_conf:.1%}")
 c3.metric("Weeks in regime", weeks_in)
 c4.metric(
     "Strategy CAGR (OOS)",
-    f"{metrics['Strategy CAGR']:.2%}",
-    delta=f"{(metrics['Strategy CAGR'] - metrics['Buy & Hold CAGR']) * 100:+.2f}pp vs B&H",
+    f"{m_oos['cagr_s']:.2%}",
+    delta=f"{(m_oos['cagr_s'] - m_oos['cagr_b']) * 100:+.2f}pp vs B&H",
 )
 
-tab_state, tab_bt, tab_table, tab_diag = st.tabs(
-    ["📊 Current State", "💰 Backtest", "📋 Predictions", "🔬 Diagnostics"]
-)
+tabs = st.tabs([
+    "📊 Current State",
+    "🔍 EDA",
+    "🤖 Model Selection",
+    "💰 Backtest",
+    "🧪 Validation",
+    "📋 Predictions",
+])
+tab_state, tab_eda, tab_model, tab_bt, tab_val, tab_table = tabs
 
-# ── Tab 1: Current State ───────────────────────────────────────────────────────
+
+# ═════════════════════════════════════════════════════════════════════════════
+# TAB 1 — Current State
+# ═════════════════════════════════════════════════════════════════════════════
 with tab_state:
     fig = make_subplots(
         rows=2, cols=1, shared_xaxes=True,
         row_heights=[0.7, 0.3], vertical_spacing=0.08,
-        subplot_titles=("S&P 500 with Regime Shading", "Model Confidence (per week)"),
+        subplot_titles=("S&P 500 with Regime Shading (OOS)",
+                        "Model Confidence (per week)"),
     )
-    prev_date, prev_reg = preds["price"].index[0], regime.iloc[0]
+    # regime shading
+    prev_d, prev_r = preds["price"].index[0], regime.iloc[0]
     for i in range(1, len(regime)):
-        if regime.iloc[i] != prev_reg or i == len(regime) - 1:
-            fig.add_vrect(
-                x0=prev_date, x1=preds["price"].index[i],
-                fillcolor=colors[prev_reg], opacity=0.18,
-                layer="below", line_width=0, row=1, col=1,
-            )
-            prev_date, prev_reg = preds["price"].index[i], regime.iloc[i]
-    fig.add_trace(
-        go.Scatter(x=preds["price"].index, y=preds["price"].values,
-                   mode="lines", name="S&P 500", line=dict(color=GOLD, width=2)),
-        row=1, col=1,
-    )
-    for r, c in colors.items():
+        if regime.iloc[i] != prev_r or i == len(regime) - 1:
+            fig.add_vrect(x0=prev_d, x1=preds["price"].index[i],
+                          fillcolor=COLORS[prev_r], opacity=0.18,
+                          layer="below", line_width=0, row=1, col=1)
+            prev_d, prev_r = preds["price"].index[i], regime.iloc[i]
+    fig.add_trace(go.Scatter(x=preds["price"].index, y=preds["price"].values,
+                             mode="lines", name="S&P 500",
+                             line=dict(color=GOLD, width=2)), row=1, col=1)
+    for r, c in COLORS.items():
         idx = regime == r
         if idx.any():
-            fig.add_trace(
-                go.Scatter(x=preds["price"].index[idx], y=preds["price"].values[idx],
-                           mode="markers", name=r,
-                           marker=dict(color=c, size=9, line=dict(width=0.6, color=BG))),
-                row=1, col=1,
-            )
-    fig.add_trace(
-        go.Bar(x=confidence.index, y=confidence.values,
-               marker=dict(color=[colors[r] for r in regime]),
-               showlegend=False, name="Confidence"),
-        row=2, col=1,
-    )
+            fig.add_trace(go.Scatter(
+                x=preds["price"].index[idx], y=preds["price"].values[idx],
+                mode="markers", name=r,
+                marker=dict(color=c, size=9, line=dict(width=0.6, color=BG))),
+                row=1, col=1)
+    fig.add_trace(go.Bar(x=conf.index, y=conf.values,
+                         marker=dict(color=[COLORS[r] for r in regime]),
+                         showlegend=False, name="Confidence"),
+                  row=2, col=1)
     fig.add_hline(y=0.8, line_dash="dash", line_color=SUBTEXT, row=2, col=1)
     fig.update_layout(height=700, hovermode="x unified",
                       legend=dict(orientation="h", y=1.05))
@@ -523,144 +512,130 @@ with tab_state:
     st.plotly_chart(fig, use_container_width=True)
 
     st.markdown(
-        f"""
-        <div style="background:{SURFACE2}; border-left:4px solid {CYAN};
-                    padding:14px 18px; border-radius:4px; color:{TEXT};
-                    margin-top:6px;">
+        f"""<div style="background:{SURFACE2}; border-left:4px solid {CYAN};
+                       padding:14px 18px; border-radius:4px; color:{TEXT};">
           <b style="color:{CYAN};">CURRENT CALL</b> &nbsp; · &nbsp;
-          {model_choice} (K={K}) classifies the market as
-          <b style="color:{colors[latest_regime]};">{latest_regime}</b>
+          {model_choice} (K=3) classifies the market as
+          <b style="color:{COLORS[latest_regime]};">{latest_regime}</b>
           at <b>{latest_conf:.1%}</b> confidence,
           holding for <b>{weeks_in}</b> consecutive week(s).
-        </div>
-        """,
+        </div>""",
         unsafe_allow_html=True,
     )
 
-# ── Tab 2: Backtest ────────────────────────────────────────────────────────────
-with tab_bt:
-    fig = make_subplots(specs=[[{"secondary_y": True}]])
 
-    # Regime shading
-    reg_series = bt["regime"]
-    prev_date, prev_reg = bt.index[0], reg_series.iloc[0]
-    for i in range(1, len(reg_series)):
-        cur_reg = reg_series.iloc[i]
-        if cur_reg != prev_reg or i == len(reg_series) - 1:
-            fig.add_vrect(
-                x0=str(prev_date), x1=str(bt.index[i]),
-                fillcolor=colors[prev_reg], opacity=0.16,
-                layer="below", line_width=0,
-            )
-            prev_date, prev_reg = bt.index[i], cur_reg
+# ═════════════════════════════════════════════════════════════════════════════
+# TAB 2 — EDA (mirrors notebook §4)
+# ═════════════════════════════════════════════════════════════════════════════
+with tab_eda:
+    train_df = M["train_df"]; train_feat = M["train_features"]
+    weekly_lr = train_feat["Log_Return"].dropna()
 
-    # Strategy & B&H (left axis)
-    fig.add_trace(
-        go.Scatter(x=bt.index, y=bt["cum_strat"], mode="lines",
-                   name="Strategy", line=dict(color=GOLD, width=2.5)),
-        secondary_y=False,
-    )
-    fig.add_trace(
-        go.Scatter(x=bt.index, y=bt["cum_bnh"], mode="lines",
-                   name="Buy & Hold", line=dict(color=SUBTEXT, width=2, dash="dash")),
-        secondary_y=False,
-    )
-
-    # S&P 500 price (right axis)
-    price_bt = preds["price"].reindex(bt.index)
-    fig.add_trace(
-        go.Scatter(x=price_bt.index, y=price_bt.values, mode="lines",
-                   name="S&P 500", line=dict(color=CYAN, width=1, dash="dot"),
-                   opacity=0.55),
-        secondary_y=True,
-    )
-
-    # End-value labels
-    final_strat = bt["cum_strat"].iloc[-1]
-    final_bnh   = bt["cum_bnh"].iloc[-1]
-    last_date   = bt.index[-1]
-    fig.add_annotation(x=last_date, y=final_bnh,   text=f"${final_bnh:.3f}",
-                       showarrow=False, xanchor="left", xshift=6,
-                       font=dict(color=SUBTEXT, size=12))
-    fig.add_annotation(x=last_date, y=final_strat, text=f"${final_strat:.3f}",
-                       showarrow=False, xanchor="left", xshift=6,
-                       font=dict(color=GOLD, size=12, family="Calibri"))
-
-    # Regime colour legend patches
-    for lbl, col in colors.items():
-        fig.add_trace(go.Scatter(
-            x=[None], y=[None], mode="markers",
-            marker=dict(size=12, color=col, symbol="square", opacity=0.5),
-            name=lbl, showlegend=True,
-        ))
-
-    fig.update_layout(
-        title=dict(
-            text=(f"<b>OUT-OF-SAMPLE BACKTEST</b>  ·  {TEST_START} → {TEST_END}"
-                  f"<br><span style='font-size:11px; color:{SUBTEXT};'>"
-                  f"{model_choice} K={K}  ·  Regime-aware allocation vs Buy & Hold</span>"),
-            font=dict(color=GOLD),
-        ),
-        xaxis_title="Date", height=520, hovermode="x unified",
-        legend=dict(orientation="h", y=1.08),
-    )
-    fig.update_yaxes(title_text="Portfolio Value ($1 invested)", secondary_y=False)
-    fig.update_yaxes(title_text="S&P 500 Price", secondary_y=True, showgrid=False)
+    # Price + Volume
+    st.markdown(f"<h3 style='color:{GOLD};'>S&P 500 — Training Window</h3>",
+                unsafe_allow_html=True)
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
+                        row_heights=[0.7, 0.3], vertical_spacing=0.06,
+                        subplot_titles=("Weekly Close (2010–2024)", "Weekly Volume"))
+    fig.add_trace(go.Scatter(x=train_df.index, y=train_df["Close"],
+                             line=dict(color=GOLD, width=1.5),
+                             name="S&P 500"), row=1, col=1)
+    fig.add_trace(go.Bar(x=train_df.index, y=train_df["Volume"],
+                         marker=dict(color=CYAN), opacity=0.6,
+                         name="Volume", showlegend=False), row=2, col=1)
+    fig.update_layout(height=480, showlegend=False)
     st.plotly_chart(fig, use_container_width=True)
 
-    # Drawdown
-    dd_strat = (bt["cum_strat"] - bt["cum_strat"].cummax()) / bt["cum_strat"].cummax()
-    dd_bnh   = (bt["cum_bnh"]   - bt["cum_bnh"].cummax())   / bt["cum_bnh"].cummax()
-    fig_dd = go.Figure()
-    fig_dd.add_trace(go.Scatter(x=dd_strat.index, y=dd_strat * 100, mode="lines",
-                                name="Strategy",   line=dict(color=GOLD, width=2),
-                                fill="tozeroy", fillcolor="rgba(229,181,61,0.2)"))
-    fig_dd.add_trace(go.Scatter(x=dd_bnh.index,   y=dd_bnh   * 100, mode="lines",
-                                name="Buy & Hold", line=dict(color=SUBTEXT, dash="dash")))
-    fig_dd.update_layout(title=dict(text="<b>Drawdown (%)</b>", font=dict(color=GOLD)),
-                         yaxis_title="Drawdown (%)", height=300, hovermode="x unified")
-    st.plotly_chart(fig_dd, use_container_width=True)
-
-    st.markdown(f"<h3 style='color:{GOLD};'>Performance Metrics</h3>",
+    # Returns vs Normal — mirrors notebook §4.3
+    st.markdown(f"<h3 style='color:{GOLD};'>Returns vs Normal — Fat Tails</h3>",
                 unsafe_allow_html=True)
-    rows = [
-        ["CAGR",                  f"{metrics['Strategy CAGR']:.2%}",   f"{metrics['Buy & Hold CAGR']:.2%}"],
-        ["Annualised Volatility", f"{metrics['Strategy Vol']:.2%}",    f"{metrics['Buy & Hold Vol']:.2%}"],
-        ["Sharpe Ratio",          f"{metrics['Strategy Sharpe']:.3f}", f"{metrics['Buy & Hold Sharpe']:.3f}"],
-        ["Max Drawdown",          f"{metrics['Strategy Max DD']:.2%}", f"{metrics['Buy & Hold Max DD']:.2%}"],
-        ["Regime Switches",       f"{metrics['Switches']}",            "—"],
-    ]
-    st.dataframe(pd.DataFrame(rows, columns=["Metric", "Strategy", "Buy & Hold"]),
-                 use_container_width=True, hide_index=True)
+    colA, colB = st.columns([3, 1])
+    with colA:
+        x = np.linspace(weekly_lr.min(), weekly_lr.max(), 250)
+        fig = go.Figure()
+        fig.add_trace(go.Histogram(x=weekly_lr, nbinsx=70, histnorm="probability density",
+                                    marker_color=CYAN, opacity=0.85, name="Empirical"))
+        fig.add_trace(go.Scatter(x=x, y=stats.norm.pdf(x, weekly_lr.mean(), weekly_lr.std()),
+                                 line=dict(color=GOLD, width=2.6),
+                                 name="Normal fit"))
+        fig.update_layout(height=380, xaxis_title="Log Return",
+                          yaxis_title="Density",
+                          legend=dict(orientation="h", y=1.05))
+        st.plotly_chart(fig, use_container_width=True)
+    with colB:
+        st.metric("Std. dev.",        f"{weekly_lr.std():.4f}")
+        st.metric("Skewness",         f"{weekly_lr.skew():.3f}")
+        st.metric("Excess kurtosis",  f"{weekly_lr.kurtosis():.2f}")
+        st.markdown(
+            f"<div style='color:{SUBTEXT}; font-size:11px; margin-top:8px;'>"
+            f"Excess kurtosis ≫ 0 → fat tails → mixture model justified."
+            f"</div>",
+            unsafe_allow_html=True,
+        )
 
-# ── Tab 3: Predictions ─────────────────────────────────────────────────────────
-with tab_table:
-    n = st.slider("Show last N weeks", 5, len(regime), min(20, len(regime)))
-    table = pd.DataFrame({
-        "Price":         preds["price"].round(2),
-        "Regime":        regime,
-        "Confidence":    confidence.round(3),
-        "Weekly Return": preds["log_ret"].apply(lambda x: f"{x:+.2%}"),
-    }).tail(n).iloc[::-1]
-    st.dataframe(table, use_container_width=True)
-    csv = table.to_csv().encode("utf-8")
-    st.download_button("📥 Download CSV", csv,
-                       file_name=f"regime_predictions_{model_choice}_K{K}.csv",
-                       mime="text/csv")
+    # Feature correlation
+    st.markdown(f"<h3 style='color:{GOLD};'>Feature Correlation</h3>",
+                unsafe_allow_html=True)
+    corr = train_feat[FEATURE_COLS].corr()
+    fig = go.Figure(data=go.Heatmap(
+        z=corr.values, x=corr.columns, y=corr.index,
+        colorscale=[[0, RED], [0.5, SURFACE], [1, GOLD]],
+        zmin=-1, zmax=1,
+        text=[[f"{v:.2f}" for v in row] for row in corr.values],
+        texttemplate="%{text}",
+        textfont={"color": TEXT, "size": 12},
+        colorbar=dict(tickfont=dict(color=SUBTEXT)),
+    ))
+    fig.update_layout(height=420, yaxis=dict(autorange="reversed"))
+    st.plotly_chart(fig, use_container_width=True)
 
-# ── Tab 4: Diagnostics ─────────────────────────────────────────────────────────
-with tab_diag:
-    if model_choice == "HMM":
-        m       = models[key]
-        labels  = ["Bear", "Neutral", "Bull"]
-        lbl_map = models[f"{key}_map"]
-        order   = sorted(lbl_map, key=lambda s: labels.index(lbl_map[s]))
-        trans   = m.transmat_[np.ix_(order, order)]
 
-        st.markdown(f"<h3 style='color:{GOLD};'>HMM Transition Matrix</h3>",
-                    unsafe_allow_html=True)
+# ═════════════════════════════════════════════════════════════════════════════
+# TAB 3 — Model Selection (mirrors notebook §8 + §9 + §13)
+# ═════════════════════════════════════════════════════════════════════════════
+with tab_model:
+    st.markdown(f"<h3 style='color:{GOLD};'>GMM K=3 vs HMM K=3</h3>",
+                unsafe_allow_html=True)
+    cA, cB = st.columns(2)
+    with cA:
+        fig = go.Figure(go.Bar(
+            x=["GMM K=3", "HMM K=3"], y=[M["gmm_bic"], M["hmm_bic"]],
+            marker_color=[CYAN, GOLD], width=[0.45, 0.45],
+            text=[f"{M['gmm_bic']:,.0f}", f"{M['hmm_bic']:,.0f}"],
+            textposition="outside", textfont=dict(color=TEXT),
+        ))
+        winner = "GMM K=3" if M["gmm_bic"] < M["hmm_bic"] else "HMM K=3"
+        fig.update_layout(title=dict(
+            text=f"<b>BIC — lower wins</b>  ·  winner: <span style='color:{GOLD};'>{winner}</span>",
+            font=dict(color=GOLD)),
+            height=360, yaxis_title="BIC")
+        st.plotly_chart(fig, use_container_width=True)
+    with cB:
+        fig = go.Figure(go.Bar(
+            x=["GMM K=3", "HMM K=3"], y=[M["gmm_ll"], M["hmm_ll"]],
+            marker_color=[CYAN, GOLD], width=[0.45, 0.45],
+            text=[f"{M['gmm_ll']:,.0f}", f"{M['hmm_ll']:,.0f}"],
+            textposition="outside", textfont=dict(color=TEXT),
+        ))
+        winner = "GMM K=3" if M["gmm_ll"] > M["hmm_ll"] else "HMM K=3"
+        fig.update_layout(title=dict(
+            text=f"<b>Log-Likelihood — higher wins</b>  ·  winner: <span style='color:{GOLD};'>{winner}</span>",
+            font=dict(color=GOLD)),
+            height=360, yaxis_title="Total LL")
+        st.plotly_chart(fig, use_container_width=True)
+
+    # HMM transition matrix (only meaningful for HMM)
+    st.markdown(f"<h3 style='color:{GOLD};'>HMM Transition Matrix</h3>",
+                unsafe_allow_html=True)
+    hmm = M["hmm"]; lblmap = M["hmm_map"]
+    order_labels = ["Bear", "Neutral", "Bull"]
+    order_idx = sorted(lblmap, key=lambda s: order_labels.index(lblmap[s]))
+    trans = hmm.transmat_[np.ix_(order_idx, order_idx)]
+
+    cL, cR = st.columns([2, 1])
+    with cL:
         fig = go.Figure(data=go.Heatmap(
-            z=trans, x=[f"→ {l}" for l in labels], y=labels,
+            z=trans, x=[f"→ {l}" for l in order_labels], y=order_labels,
             colorscale=[[0, SURFACE], [0.5, "#3D7BB8"], [1, GOLD]],
             zmin=0, zmax=1,
             text=[[f"{v:.3f}" for v in row] for row in trans],
@@ -668,39 +643,224 @@ with tab_diag:
             textfont={"size": 16, "color": TEXT, "family": "Calibri"},
             colorbar=dict(tickfont=dict(color=SUBTEXT)),
         ))
-        fig.update_layout(height=380, yaxis=dict(autorange="reversed"))
+        fig.update_layout(height=400, yaxis=dict(autorange="reversed"),
+                          title=dict(text="<b>P(next state | this state)</b>",
+                                     font=dict(color=GOLD)))
         st.plotly_chart(fig, use_container_width=True)
-        cols = st.columns(K)
-        for col, lbl, p in zip(cols, labels, np.diag(trans)):
-            col.metric(f"Expected dwell · {lbl}", f"{1 / (1 - p + 1e-10):.1f} weeks")
-    else:
-        st.info("Transition matrix is meaningful only for HMM — switch to HMM in the sidebar.")
+    with cR:
+        for lbl, p in zip(order_labels, np.diag(trans)):
+            st.metric(f"Dwell · {lbl}", f"{1 / (1 - p + 1e-10):.1f} weeks")
+        stickiness = float(np.mean(np.diag(trans)))
+        st.markdown(
+            f"<div style='background:{SURFACE2}; border-left:4px solid {GOLD};"
+            f" padding:10px 14px; border-radius:4px; color:{TEXT}; "
+            f" font-size:11.5px; margin-top:10px;'>"
+            f"<b style='color:{GOLD};'>STICKINESS</b> = {stickiness:.3f}<br>"
+            f"Healthy weekly-equity range: 0.85 – 0.97."
+            f"</div>",
+            unsafe_allow_html=True,
+        )
 
+    # Mean feature values per regime (notebook §8.1)
+    st.markdown(f"<h3 style='color:{GOLD};'>Mean Feature Values per Regime (Training)</h3>",
+                unsafe_allow_html=True)
+    states = M[f"{key}_states"]
+    lblmap_active = M[f"{key}_map"]
+    train_regime = pd.Series(states, index=M["X_train"].index).map(lblmap_active)
+    feat_means   = (M["X_train"].assign(Regime=train_regime)
+                     .groupby("Regime")[FEATURE_COLS].mean().round(3)
+                     .reindex(["Bear", "Neutral", "Bull"]))
+    st.dataframe(feat_means, use_container_width=True)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# TAB 4 — Backtest (mirrors notebook §12)
+# ═════════════════════════════════════════════════════════════════════════════
+with tab_bt:
+    # In-sample regime + returns
+    train_states = M[f"{key}_states"]
+    train_regime = pd.Series(train_states, index=M["X_train"].index).map(M[f"{key}_map"])
+    train_ret    = M["train_features"].loc[M["X_train"].index, "Log_Return"]
+    bt_is = run_backtest(train_regime, train_ret)
+    m_is  = perf_metrics(bt_is)
+
+    view = st.radio("View", ["Out-of-sample (2025+)", "In-sample (2010-2024)"],
+                    horizontal=True, index=0)
+    bt = bt_oos if view.startswith("Out") else bt_is
+    m  = m_oos  if view.startswith("Out") else m_is
+    title_window = (f"OOS · {TEST_START} → {TEST_END}" if view.startswith("Out")
+                    else f"IS · {TRAIN_START} → {TRAIN_END}")
+
+    # Equity curve with regime shading
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    reg_series = bt["regime"]
+    prev_d, prev_r = bt.index[0], reg_series.iloc[0]
+    for i in range(1, len(reg_series)):
+        cur = reg_series.iloc[i]
+        if cur != prev_r or i == len(reg_series) - 1:
+            fig.add_vrect(x0=str(prev_d), x1=str(bt.index[i]),
+                          fillcolor=COLORS[prev_r], opacity=0.16,
+                          layer="below", line_width=0)
+            prev_d, prev_r = bt.index[i], cur
+
+    fig.add_trace(go.Scatter(x=bt.index, y=bt["cum_strat"], name="Strategy",
+                             line=dict(color=GOLD, width=2.5)), secondary_y=False)
+    fig.add_trace(go.Scatter(x=bt.index, y=bt["cum_bnh"], name="Buy & Hold",
+                             line=dict(color=SUBTEXT, width=2, dash="dash")),
+                  secondary_y=False)
+
+    fig.add_annotation(x=bt.index[-1], y=bt["cum_bnh"].iloc[-1],
+                       text=f"${bt['cum_bnh'].iloc[-1]:.3f}",
+                       showarrow=False, xanchor="left", xshift=6,
+                       font=dict(color=SUBTEXT, size=12))
+    fig.add_annotation(x=bt.index[-1], y=bt["cum_strat"].iloc[-1],
+                       text=f"${bt['cum_strat'].iloc[-1]:.3f}",
+                       showarrow=False, xanchor="left", xshift=6,
+                       font=dict(color=GOLD, size=12))
+
+    for lbl, c in COLORS.items():
+        fig.add_trace(go.Scatter(x=[None], y=[None], mode="markers",
+                                 marker=dict(size=12, color=c, symbol="square", opacity=0.5),
+                                 name=lbl, showlegend=True))
+
+    fig.update_layout(
+        title=dict(text=f"<b>Equity Curve</b>  ·  {model_choice} K=3  ·  {title_window}",
+                   font=dict(color=GOLD)),
+        height=520, hovermode="x unified",
+        legend=dict(orientation="h", y=1.08),
+    )
+    fig.update_yaxes(title_text="Portfolio Value ($1 invested)", secondary_y=False)
+    fig.update_yaxes(visible=False, secondary_y=True)
+    st.plotly_chart(fig, use_container_width=True)
+
+    # Drawdown
+    dd_s = (bt["cum_strat"] - bt["cum_strat"].cummax()) / bt["cum_strat"].cummax()
+    dd_b = (bt["cum_bnh"]   - bt["cum_bnh"].cummax())   / bt["cum_bnh"].cummax()
+    fig_dd = go.Figure()
+    fig_dd.add_trace(go.Scatter(x=dd_s.index, y=dd_s * 100, name="Strategy",
+                                line=dict(color=GOLD, width=2),
+                                fill="tozeroy", fillcolor="rgba(229,181,61,0.2)"))
+    fig_dd.add_trace(go.Scatter(x=dd_b.index, y=dd_b * 100, name="Buy & Hold",
+                                line=dict(color=SUBTEXT, dash="dash")))
+    fig_dd.update_layout(title=dict(text="<b>Drawdown (%)</b>", font=dict(color=GOLD)),
+                         yaxis_title="Drawdown (%)", height=300, hovermode="x unified")
+    st.plotly_chart(fig_dd, use_container_width=True)
+
+    # Metrics table
+    st.markdown(f"<h3 style='color:{GOLD};'>Performance — {title_window}</h3>",
+                unsafe_allow_html=True)
+    rows = [
+        ["CAGR",                  f"{m['cagr_s']:.2%}",  f"{m['cagr_b']:.2%}"],
+        ["Annualised Volatility", f"{m['vol_s']:.2%}",   f"{m['vol_b']:.2%}"],
+        ["Sharpe Ratio",          f"{m['shrp_s']:.3f}",  f"{m['shrp_b']:.3f}"],
+        ["Max Drawdown",          f"{m['mdd_s']:.2%}",   f"{m['mdd_b']:.2%}"],
+        ["Calmar Ratio",          f"{m['calm_s']:.3f}",  f"{m['calm_b']:.3f}"],
+        ["Win Rate vs B&H",       f"{m['win']:.2%}",     "—"],
+        ["Regime Switches",       f"{m['switches']}",     "—"],
+    ]
+    st.dataframe(pd.DataFrame(rows, columns=["Metric", "Strategy", "Buy & Hold"]),
+                 use_container_width=True, hide_index=True)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# TAB 5 — Statistical Validation (mirrors notebook §11, §12.1, §12.2)
+# ═════════════════════════════════════════════════════════════════════════════
+with tab_val:
+    train_ret    = M["train_features"].loc[M["X_train"].index, "Log_Return"]
+    gmm_reg_tr   = pd.Series(M["gmm_states"], index=M["X_train"].index).map(M["gmm_map"])
+    hmm_reg_tr   = pd.Series(M["hmm_states"], index=M["X_train"].index).map(M["hmm_map"])
+
+    f_g, p_g = f_oneway(
+        train_ret[gmm_reg_tr == "Bull"],
+        train_ret[gmm_reg_tr == "Neutral"],
+        train_ret[gmm_reg_tr == "Bear"],
+    )
+    f_h, p_h = f_oneway(
+        train_ret[hmm_reg_tr == "Bull"],
+        train_ret[hmm_reg_tr == "Neutral"],
+        train_ret[hmm_reg_tr == "Bear"],
+    )
+    lv_g, lp_g = levene(
+        train_ret[gmm_reg_tr == "Bull"],
+        train_ret[gmm_reg_tr == "Neutral"],
+        train_ret[gmm_reg_tr == "Bear"],
+    )
+    lv_h, lp_h = levene(
+        train_ret[hmm_reg_tr == "Bull"],
+        train_ret[hmm_reg_tr == "Neutral"],
+        train_ret[hmm_reg_tr == "Bear"],
+    )
+
+    cL, cR = st.columns(2)
+    with cL:
+        st.markdown(
+            f"""<div style='background:{SURFACE}; border-left:4px solid {GOLD};
+                          padding:14px 18px; border-radius:6px;'>
+              <div style='color:{GOLD}; font-weight:700; font-size:11px;
+                          letter-spacing:1px;'>ONE-WAY ANOVA · mean returns differ?</div>
+              <div style='font-family:Consolas, monospace; color:{TEXT};
+                          font-size:14px; margin-top:10px; line-height:1.7;'>
+                GMM&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;F = {f_g:.2f}&nbsp;&nbsp;&nbsp;&nbsp;p = {p_g:.4g}<br>
+                HMM&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;F = {f_h:.2f}&nbsp;&nbsp;&nbsp;&nbsp;p = {p_h:.4g}
+              </div>
+              <div style='color:{SUBTEXT}; font-size:11px; margin-top:10px;'>
+                GMM separates strongly by mean return; HMM groups more by volatility regime than direction.
+              </div>
+            </div>""",
+            unsafe_allow_html=True,
+        )
+    with cR:
+        st.markdown(
+            f"""<div style='background:{SURFACE}; border-left:4px solid {CYAN};
+                          padding:14px 18px; border-radius:6px;'>
+              <div style='color:{CYAN}; font-weight:700; font-size:11px;
+                          letter-spacing:1px;'>LEVENE'S TEST · variances differ?</div>
+              <div style='font-family:Consolas, monospace; color:{TEXT};
+                          font-size:14px; margin-top:10px; line-height:1.7;'>
+                GMM&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;F = {lv_g:.2f}&nbsp;&nbsp;&nbsp;&nbsp;p = {lp_g:.4g}<br>
+                HMM&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;F = {lv_h:.2f}&nbsp;&nbsp;&nbsp;&nbsp;p = {lp_h:.4g}
+              </div>
+              <div style='color:{SUBTEXT}; font-size:11px; margin-top:10px;'>
+                Both models cleanly separate volatility regimes — the more useful result for risk management.
+              </div>
+            </div>""",
+            unsafe_allow_html=True,
+        )
+
+    # Regime distribution OOS
     st.markdown(f"<h3 style='color:{GOLD};'>Regime Distribution (OOS)</h3>",
                 unsafe_allow_html=True)
-    dist = regime.value_counts(normalize=True).mul(100).round(1)
+    dist = regime.value_counts(normalize=True).mul(100).round(1).reindex(
+        ["Bear", "Neutral", "Bull"]).fillna(0)
     fig = go.Figure(go.Bar(
         x=dist.index, y=dist.values,
-        marker_color=[colors[r] for r in dist.index],
+        marker_color=[COLORS[r] for r in dist.index],
         marker_line_color=BG, marker_line_width=2,
         text=[f"{v}%" for v in dist.values], textposition="outside",
         textfont=dict(color=TEXT),
     ))
     fig.update_layout(yaxis_title="% of weeks", height=350,
-                      yaxis=dict(range=[0, max(dist.values) * 1.2]))
+                      yaxis=dict(range=[0, max(dist.values) * 1.25 if dist.values.max() else 100]))
     st.plotly_chart(fig, use_container_width=True)
 
-    st.markdown(f"<h3 style='color:{GOLD};'>Mean Feature Values per Regime (Training)</h3>",
-                unsafe_allow_html=True)
-    X_tr         = models["X_train"]
-    train_states = models[key].predict(X_tr.values)
-    train_regime = pd.Series(train_states, index=X_tr.index).map(models[f"{key}_map"])
-    feat_means   = (
-        X_tr.assign(Regime=train_regime)
-            .groupby("Regime")[FEATURE_COLS]
-            .mean().round(3)
-    )
-    st.dataframe(feat_means, use_container_width=True)
+
+# ═════════════════════════════════════════════════════════════════════════════
+# TAB 6 — Predictions
+# ═════════════════════════════════════════════════════════════════════════════
+with tab_table:
+    n = st.slider("Show last N weeks", 5, len(regime), min(20, len(regime)))
+    table = pd.DataFrame({
+        "Price":         preds["price"].round(2),
+        "Regime":        regime,
+        "Confidence":    conf.round(3),
+        "Weekly Return": preds["log_ret"].apply(lambda x: f"{x:+.2%}"),
+    }).tail(n).iloc[::-1]
+    st.dataframe(table, use_container_width=True)
+    csv = table.to_csv().encode("utf-8")
+    st.download_button("📥 Download CSV", csv,
+                       file_name=f"regime_predictions_{model_choice}_K3.csv",
+                       mime="text/csv")
+
 
 # ── Footer ─────────────────────────────────────────────────────────────────────
 st.markdown(
