@@ -461,8 +461,9 @@ with st.sidebar:
         unsafe_allow_html=True,
     )
     st.markdown(f"<hr style='border-color:{RULE}'>", unsafe_allow_html=True)
-    if st.button("🔄 Refresh data"):
+    if st.button("🔄 Refresh data & retrain"):
         st.cache_data.clear()
+        st.cache_resource.clear()
         st.rerun()
 
 M      = train_models()
